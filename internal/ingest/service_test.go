@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/ingest"
 	"github.com/convin/webhook-ingest/internal/stats"
@@ -122,5 +123,32 @@ func TestConcurrentDuplicateDeliveryIsProcessedOnce(t *testing.T) {
 	}
 	if got.CallCount != 1 || got.TotalDurationSec != 143 {
 		t.Fatalf("got %+v, want one 143-second call", got)
+	}
+}
+
+func TestShutdownDrainsRecordingWork(t *testing.T) {
+	st := testutil.NewStore(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	svc := ingest.New(st, stats.NewCache(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	evt := ingest.Event{
+		EventID: eventID, CallID: callID, AccountID: accountID,
+		Status: "completed", DurationSec: 143, RecordingURL: "https://example.com/recording.wav",
+	}
+	if err := svc.Ingest(context.Background(), evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := svc.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	var processed bool
+	if err := st.Pool().QueryRow(context.Background(), `SELECT recording_processed FROM calls WHERE call_id = $1`, callID).Scan(&processed); err != nil {
+		t.Fatalf("read call: %v", err)
+	}
+	if !processed {
+		t.Fatal("recording was not processed before shutdown")
 	}
 }

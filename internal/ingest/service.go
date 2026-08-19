@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,6 +23,7 @@ type Service struct {
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+	work  sync.WaitGroup
 }
 
 // New builds a Service.
@@ -64,14 +66,32 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 
 	// Recordings are slow to fetch, so that part does not block the provider.
 	if rec.RecordingURL != "" {
+		s.work.Add(1)
 		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
+			defer s.work.Done()
+			if err := s.processRecording(context.Background(), rec); err != nil {
+				s.log.Error("process recording", "event_id", rec.EventID, "call_id", rec.CallID, "err", err)
 			}
 		}()
 	}
 
 	return nil
+}
+
+// Shutdown waits for recording work already accepted by Ingest to finish.
+func (s *Service) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.work.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // processRecording downloads and transcodes the call recording, then marks
